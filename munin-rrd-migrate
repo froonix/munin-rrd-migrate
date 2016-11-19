@@ -1,4 +1,4 @@
-#!/usr/bin/env php5
+#!/usr/bin/env php
 <?php
 
 define('VERSION',	'0.1.0-dev');
