@@ -1,0 +1,1095 @@
+#!/usr/bin/env php5
+<?php
+
+define('VERSION',	'0.1.0-dev');
+define('DATE',		'2014-08-19');
+define('AUTHOR',	'Christian Schroetter <cs@fnx.li>');
+define('LICENCE',	'CC BY-SA 4.0 <http://creativecommons.org/licenses/by-sa/4.0/>');
+define('SOURCE',	'http://www.blog.happytec.at/index.php?mode=view&id=__TBA__');
+
+function exception_error_handler($errno, $errstr, $errfile, $errline )
+{ throw new ErrorException($errstr, 0, $errno, $errfile, $errline); }
+set_error_handler(__namespace__ . 'exception_error_handler');
+
+if($_SERVER['argc'] == 1)
+{
+	displayHelp();
+}
+
+$input = $output = $import = null;
+$overwrite = false;
+$format = null;
+$time = null;
+$all = false;
+
+$longopts = ['all', 'destination:', 'format:', 'help', 'import:', 'overwrite', 'source:', 'time:', 'version'];
+$opts = getopt('ad:f:hi:os:t:v', $longopts);
+
+$c = count($longopts);
+for($i = 0; $i < $c; $i++)
+{
+	$longopt = preg_replace('#[^A-Z]+#i', '', $longopts[$i]);
+	$shortopt = substr($longopt, 0, 1);
+
+	if(isset($opts[$shortopt]))
+	{
+		if(isset($opts[$longopt]))
+		{
+			throw new Exception(sprintf('Please use only the short or long option: -%s/--%s', $shortopt, $longopt));
+		}
+		else
+		{
+			$opts[$longopt] = $opts[$shortopt];
+			unset($opts[$shortopt]);
+		}
+	}
+
+	if(isset($opts[$longopt]))
+	{
+		if(is_array($opts[$longopt]))
+		{
+			throw new Exception(sprintf('Please don\'t use an option multiple times: -%s/--%s (%d)', $shortopt, $longopt, count($opts[$longopt])));
+		}
+
+		switch($longopt)
+		{
+			case 'help':
+				displayHelp();
+				break;
+
+			case 'version':
+				displayVersion();
+				break;
+
+			case 'all':
+			case 'overwrite':
+				$$longopt = true;
+				break;
+
+			case 'time':
+				$time = (int) $opts[$longopt];
+				break;
+
+			case 'source':
+				$input = $opts[$longopt];
+				break;
+
+			case 'destination':
+				$output = $opts[$longopt];
+				break;
+
+			case 'format':
+			case 'import':
+				$$longopt = $opts[$longopt];
+				break;
+
+			default:
+				throw new Exception('That\'s a bug in our getopt() statement...');
+				break;
+		}
+	}
+}
+
+$recursive = null; $args = [];
+foreach(['input', 'import', 'output'] as $var)
+{
+	$varlopt = str_replace(array('input', 'output'), array('source', 'destination'), $var);
+	$varsopt = substr($varlopt, 0, 1);
+
+	if($var == 'import' && $$var === null)
+	{
+		continue;
+	}
+	else if($$var == '')
+	{
+		throw new Exception(sprintf('Required argument value not found: -%s/--%s', $varsopt, $varlopt));
+	}
+
+	if(!file_exists($$var) || ($$var = realpath($$var)) === false)
+	{
+		if($var == 'output')
+		{
+			if($recursive === false)
+			{
+				$dir = dirname($$var);
+				$file = basename($$var);
+				$type = false;
+
+				if(!file_exists($dir) || ($dir = realpath($dir)) === false)
+				{
+					throw new Exception(sprintf('-%s/--%s directory doesn\'t exist: %s', $varsopt, $varlopt, $$var));
+				}
+				else
+				{
+					$$var = $dir .'/' . $file;
+				}
+			}
+			else
+			{
+				throw new Exception('-s/--source, -d/--destination and -i/--import must be the same type (file or directory)');
+			}
+		}
+		else
+		{
+			throw new Exception(sprintf('-%s/--%s doesn\'t exist: %s', $varsopt, $varlopt, $$var));
+		}
+	}
+	else
+	{
+		if(is_file($$var))
+		{
+			$type = false;
+		}
+		else if(is_dir($$var))
+		{
+			$type = true;
+		}
+		else
+		{
+			throw new Exception(sprintf('-%s/--%s isn\'t a file or directory: %s', $varsopt, $varlopt, $$var));
+		}
+	}
+
+	if($recursive !== null && $recursive !== $type)
+	{
+		throw new Exception('-s/--source, -d/--destination and -i/--import must be the same type (file or directory)');
+	}
+	else
+	{
+		$recursive = $type;
+	}
+
+	$$var = preg_replace('#[/]{2,}#', '/', $$var);
+
+	if(isset($args[$$var]))
+	{
+		throw new Exception('-s/--source, -d/--destination and -i/--import must be unique');
+	}
+	else
+	{
+		$args[$$var] = true;
+	}
+}
+unset($dir, $file, $type, $var, $args);
+
+$main = new mRRDm();
+$main->setFormat($format, $time);
+unset($main);
+
+if($recursive)
+{
+	$files = [];
+	$folders = [''];
+
+	while(($folder = array_shift($folders)) !== null)
+	{
+		$fullpath = $input . $folder;
+
+		if(($handle = opendir($fullpath)) !== false)
+		{
+			while(($file = readdir($handle)) !== false)
+			{
+				$tmppath = $fullpath . '/' . $file;
+				$newpath = $folder . '/' . $file;
+
+				if($file != '.' && $file != '..' && file_exists($tmppath) && !is_link($tmppath))
+				{
+					if(is_dir($tmppath))
+					{
+						$folders[] = $newpath;
+					}
+					else if(is_file($tmppath) && preg_match('#\\.rrd$#i', $file))
+					{
+						$files[] = $newpath;
+					}
+				}
+			}
+			closedir($handle);
+		}
+		else
+		{
+			throw new Exception(sprintf('Could not open directoy: %s', $fullpath));
+		}
+	}
+	unset($folders);
+}
+else
+{
+	$files = [$input];
+}
+
+if(!count($files))
+{
+	print("No source files found...\n");
+	exit(1);
+}
+
+sort($files);
+$processed = 0;
+$count = count($files);
+for($i = 0; $i < $count; $i++)
+{
+	if($recursive)
+	{
+		$input_filename = $input . $files[$i];
+		$import_filename = $import . $files[$i];
+		$output_filename = $output . $files[$i];
+		$output_dir = dirname($output_filename);
+	}
+	else
+	{
+		$input_filename = $files[$i];
+		$import_filename = $import;
+		$output_filename = $output;
+		$output_dir = null;
+	}
+
+	printf("[ .. ] %s ", $output_filename);
+	unset($files[$i]); $processed++;
+
+	if(file_exists($output_filename) && !$overwrite)
+	{
+		print("\r[\033[1;33m -- \033[0m]\n");
+		continue;
+	}
+
+	// Theoretisch könnten wir die Exceptions abfangen
+	// und einen entsprechenden Status ausgeben. Hmmm?
+	// ...
+
+	if($recursive && !file_exists($output_dir))
+	{
+		if(!mkdir($output_dir, 0755, true))
+		{
+			throw new Exception(sprintf('Could not create directory: %s', $output_dir));
+		}
+		else
+		{
+			clearstatcache(true, $output_dir);
+		}
+	}
+
+	$main = new mRRDm();
+	$main->setFormat($format, $time);
+	$main->loadRRD($input_filename, 'input');
+
+	if($import !== null && file_exists($import_filename) && is_readable($import_filename))
+	{
+		printf("\r[ ++ ] %s ", $output_filename);
+		$main->loadRRD($import_filename, 'import', false);
+		$main->importData('import', 'input', $all);
+		$main->unloadRRD(null, 'import');
+	}
+
+	printf("\r[ :: ] %s ", $output_filename);
+	$main->unloadRRD($output_filename, 'input');
+	print("\r[\033[0;32m OK \033[0m]\n");
+	unset($main);
+}
+unset($i, $count);
+
+printf("\nDone! %d file%s processed.\n", $processed, (($processed !== 1) ? 's' : ''));
+exit(0);
+
+class mRRDm
+{
+	private static $init		= false;
+	private static $tmpfiles	= [];
+
+	private $rrdfiles			= [];
+	private $xmlfiles			= [];
+	private $xmldata			= [];
+	private $data				= [];
+
+	private $fullformat			= null;
+	private $format				= null;
+	private $step				= null;
+
+	public function __construct()
+	{
+		self::init();
+	}
+
+	public function __desctruct()
+	{
+		foreach(['rrdfiles', 'xmlfiles', 'xmldata', 'data'] as $var)
+		{
+			$keys = array_keys($this->{$var});
+			$count = count($keys);
+
+			for($i = 0; $i < $count; $i++)
+			{
+				unset($this->{$var}[$keys[$i]]);
+			}
+		}
+	}
+
+	private static function init()
+	{
+		if(!self::$init)
+		{
+			register_shutdown_function(create_function('', __class__ . '::clean();'));
+			self::$init = true;
+		}
+	}
+
+	public static function clean()
+	{
+		$c = count(self::$tmpfiles);
+		for($i = 0; $i < $c; $i++)
+		{
+			if(self::$tmpfiles[$i] !== null)
+			{
+				self::rmTMP($i);
+			}
+		}
+	}
+
+	private static function mkTMP(&$id = null)
+	{
+		return (self::$tmpfiles[($id = count(self::$tmpfiles))] = tempnam(sys_get_temp_dir(), uniqid('', true) . '.'));
+	}
+
+	private static function rmTMP($id)
+	{
+		if(!is_int($id))
+		{
+			if(!is_string($id))
+			{
+				throw new UnexpectedValueException('id');
+			}
+			else
+			{
+				$c = count(self::$tmpfiles);
+				for($i = 0; $i < $c; $i++)
+				{
+					if(self::$tmpfiles[$i] === $id)
+					{
+						$id = $i;
+						break;
+					}
+				}
+			}
+		}
+
+		if(!isset(self::$tmpfiles[$id]))
+		{
+			throw new UnexpectedValueException(sprintf('TMP file does not exist: %s', $id));
+		}
+		else
+		{
+			unlink(self::$tmpfiles[$id]);
+			self::$tmpfiles[$id] = null;
+		}
+	}
+
+	// Validate ID ($int: true=INT false=STRING) and check existance in $array
+	private static function ckID(&$id, $int = false, &$array = null)
+	{
+		if($int && (!is_int($id) || $id < 1))
+		{
+			throw new UnexpectedValueException('id');
+		}
+		else if(!$int && (!is_string($id) || $id === ''))
+		{
+			throw new UnexpectedValueException('id');
+		}
+		else if(is_array($array) && !isset($array[$id]))
+		{
+			throw new UnexpectedValueException('id');
+		}
+	}
+
+	// Validate filename (FILE, check-existance, check-readable, check-writable)
+	private static function ckFile(&$filename, $ckx = false, $ckr = false, $ckw = false)
+	{
+		if(!is_string($filename))
+		{
+			throw new UnexpectedValueException('filename');
+		}
+		else if($ckx && !file_exists($filename))
+		{
+			throw new RuntimeException(sprintf('File does not exist: %s', $filename));
+		}
+		else if($ckr && !is_readable($filename))
+		{
+			throw new RuntimeException(sprintf('File is not readable: %s', $filename));
+		}
+		else if($ckw && !is_writable($filename))
+		{
+			throw new RuntimeException(sprintf('File is not writable: %s', $filename));
+		}
+	}
+
+	// RRD file -> XML file -> SimpleXML Object
+	public function loadRRD($filename, $id = null, $change = true)
+	{
+		if($id === null)
+		{
+			$id = uniqid(mt_rand(), true);
+		}
+		else
+		{
+			self::ckID($id, false);
+		}
+
+		$this->rrdfiles[$id]	= $filename;
+		$this->xmlfiles[$id]	= self::exportRRD($this->rrdfiles[$id], $tmpfile_id);
+		$this->xmldata[$id]		= self::importXML($this->xmlfiles[$id]);
+		$this->data[$id]		= self::analyzeData($this->xmldata[$id], $this->getFormat(), $change);
+
+		return $id;
+	}
+
+	// SimpleXML Object -> XML file -> RRD file
+	public function unloadRRD($filename, $id)
+	{
+		self::ckID($id, false);
+
+		if($filename !== null)
+		{
+			$this->releaseData($id);
+		}
+		unset($this->data[$id]);
+
+		if($filename !== null)
+		{
+			self::exportXML($this->xmldata[$id], $this->xmlfiles[$id]);
+		}
+		unset($this->xmldata[$id]);
+
+		if($filename !== null)
+		{
+			self::importRRD($this->xmlfiles[$id], $filename);
+		}
+		unset($this->rrdfiles[$id]);
+
+		self::rmTMP($this->xmlfiles[$id]);
+		unset($this->xmlfiles[$id]);
+	}
+
+	private static function exportRRD($filename, &$tmpfile_id = null)
+	{
+		self::ckFile($filename, true, true);
+		$tmpfile = self::mkTMP($tmpfile_id);
+
+		exec(sprintf('rrdtool dump %s %s', escapeshellarg($filename), escapeshellarg($tmpfile)), $output, $return_var);
+
+		if($return_var !== 0 || !file_exists($tmpfile) || !is_readable($tmpfile))
+		{
+			throw new RuntimeException(sprintf('RRDDump to XML file failed (#%d): %s', $return_var, ((count($return_var)) ? implode("\n", $return_var) : 'n/a')));
+		}
+		else
+		{
+			return $tmpfile;
+		}
+	}
+
+	private static function importRRD($xml_filename, $rrd_filename)
+	{
+		self::ckFile($xml_filename, true, true);
+		self::ckFile($rrd_filename);
+
+		exec(sprintf('rrdtool restore --force-overwrite %s %s', escapeshellarg($xml_filename), escapeshellarg($rrd_filename)), $output, $return_var);
+
+		if($return_var !== 0 || !file_exists($rrd_filename))
+		{
+			throw new RuntimeException(sprintf('RRDRestore from XML file failed (#%d): %s', $return_var, ((count($return_var)) ? implode("\n", $return_var) : 'n/a')));
+		}
+	}
+
+	private static function exportXML(SimpleXMLElement $xml, $filename)
+	{
+		self::ckFile($filename);
+		if(!file_put_contents($filename, $xml->asXML()))
+		{
+			throw new Exception();
+		}
+	}
+
+	private static function importXML($filename)
+	{
+		self::ckFile($filename, true, true);
+		return new SimpleXMLElement($filename, 0, true);
+	}
+
+	// "graph_data_size" and "update_rate"
+	public function setFormat($format = null, $int = null)
+	{
+		if($format === null)
+		{
+			$this->format = null;
+			return;
+		}
+		else if(!is_string($format))
+		{
+			throw new UnexpectedValueException('format');
+		}
+		else
+		{
+			$this->format = [];
+			$custom = true;
+		}
+
+		if($int === null)
+		{
+			$int = 300;
+		}
+		else if(!is_int($int) || $int <= 0)
+		{
+			throw new UnexpectedValueException('int');
+		}
+		$this->step = $int;
+
+		$format = explode(' ', $format, 2);
+		switch(strtolower($format[0]))
+		{
+			// Custom hard-coded format definitions
+			case 'big': $format = '2d, 30m for 9d, 2h for 45d, 1d for 1000d'; break;
+			case 'bigger': $format = '2d, 30m for 9d, 2h for 45d, 1d for 5000d'; break;
+			case 'froonix': $format = '5d, 30m for 10d, 2h for 50d, 1d for 10000d'; break;
+
+			case 'normal':
+				$format = '2d, 30m for 9d, 2h for 45d, 1d for 450d';
+				$custom = false;
+				break;
+
+			case 'custom':
+				if(isset($format[1]))
+				{
+					$format = $format[1];
+				}
+				else
+				{
+					throw new Exception('"custom" needs more input');
+				}
+				break;
+
+			default:
+				throw new Exception('Unknown "graph_data_size" keyword - try normal/custom or a shortcut');
+				break;
+		}
+
+		if(strpos($format, 'for') !== false)
+		{
+			$human = true;
+		}
+		else
+		{
+			$human = false;
+		}
+
+		$format = explode(',', $format);
+		$count = count($format);
+
+		for($i = 0; $i < $count; $i++)
+		{
+			$line = trim($format[$i]);
+
+			if($human && preg_match('#^([0-9]+)([smhdwty]{1})[ ]+for[ ]+([0-9]+)([smhdwty]{1})$#i', $line, $matches))
+			{
+				$tmp = [];
+
+				switch(strtolower($matches[4]))
+				{
+					case 's':
+						$tmp[] = (int) $matches[3];
+						break;
+
+					case 'm':
+						$tmp[] = (int) $matches[3] * 60;
+						break;
+
+					case 'h':
+						$tmp[] = (int) $matches[3] * 3600;
+						break;
+
+					case 'd':
+						$tmp[] = (int) $matches[3] * 86400;
+						break;
+
+					case 'w':
+						$tmp[] = (int) $matches[3] * 604800;
+						break;
+
+					case 't':
+						$tmp[] = (int) $matches[3] * 2678400;
+						break;
+
+					case 'y':
+						$tmp[] = (int) $matches[3] * 31536000;
+						break;
+
+					default:
+						throw new Exception();
+						break;
+				}
+
+				switch(strtolower($matches[2]))
+				{
+					case 's':
+						$tmp[] = (int) $matches[1];
+						break;
+
+					case 'm':
+						$tmp[] = (int) $matches[1] * 60;
+						break;
+
+					case 'h':
+						$tmp[] = (int) $matches[1] * 3600;
+						break;
+
+					case 'd':
+						$tmp[] = (int) $matches[1] * 86400;
+						break;
+
+					case 'w':
+						$tmp[] = (int) $matches[1] * 604800;
+						break;
+
+					case 't':
+						$tmp[] = (int) $matches[1] * 2678400;
+						break;
+
+					case 'y':
+						$tmp[] = (int) $matches[1] * 31536000;
+						break;
+
+					default:
+						throw new Exception();
+						break;
+				}
+
+				$tmp[1] = (int) ($tmp[1] / $int);
+				$tmp[0] = (int) (($tmp[0] / $int / $tmp[1]) * (($custom) ? 1.1 : 1));
+				$this->format[] = $tmp; unset($tmp);
+			}
+			else if($human && preg_match('#^([0-9]+)([smhdwty]{1})$#i', $line, $matches) && !count($this->format))
+			{
+				$tmp = [];
+
+				switch(strtolower($matches[2]))
+				{
+					case 's':
+						$tmp[] = (int) $matches[1];
+						break;
+
+					case 'm':
+						$tmp[] = (int) $matches[1] * 60;
+						break;
+
+					case 'h':
+						$tmp[] = (int) $matches[1] * 3600;
+						break;
+
+					case 'd':
+						$tmp[] = (int) $matches[1] * 86400;
+						break;
+
+					case 'w':
+						$tmp[] = (int) $matches[1] * 604800;
+						break;
+
+					case 't':
+						$tmp[] = (int) $matches[1] * 2678400;
+						break;
+
+					case 'y':
+						$tmp[] = (int) $matches[1] * 31536000;
+						break;
+
+					default:
+						throw new Exception();
+						break;
+				}
+
+				$tmp[0] = (int) (($tmp[0] / $int) * (($custom) ? 1.1 : 1));
+				$this->format[] = [$tmp[0], 1]; unset($tmp);
+			}
+			else if(!$human && preg_match('#^([0-9]+)[ ]+([0-9]+)$#i', $line, $matches))
+			{
+				$this->format[] = [(int) ((int) $matches[2] * (($custom) ? 1.1 : 1)), (int) $matches[1]];
+			}
+			else if(!$human && preg_match('#^([0-9]+)$#i', $line, $matches) && !count($this->format))
+			{
+				$this->format[] = [(int) ((int) $matches[1] * (($custom) ? 1.1 : 1)), 1];
+			}
+			else
+			{
+				throw new Exception(sprintf('Wrong format for element %d', $i));
+			}
+		}
+		unset($format, $i, $count, $line, $matches, $tmp);
+	}
+
+	public function getFormat($raw = false)
+	{
+		if($this->format === null)
+		{
+			return null;
+		}
+		else if($raw)
+		{
+			return $this->format;
+		}
+		else if($this->fullformat === null)
+		{
+			$this->fullformat = [
+				'step' => $this->step,
+				'data' => [],
+			];
+
+			$count = count($this->format);
+			for($i = 0; $i < $count; $i++)
+			{
+				$this->fullformat['data'][] = [$this->format[$i][0], $this->format[$i][1], 'AVERAGE'];
+				$this->fullformat['data'][] = [$this->format[$i][0], $this->format[$i][1], 'MIN'];
+				$this->fullformat['data'][] = [$this->format[$i][0], $this->format[$i][1], 'MAX'];
+			}
+		}
+
+		return $this->fullformat;
+	}
+
+	// Read XML data and store it for internal usage. If needed grow/shrink directly.
+	private function analyzeData(SimpleXMLElement &$xml, $format = null, $change = true)
+	{
+		$data			= [
+			'rra'		=> [],
+			'format'	=> [
+				'step'		=> (int) $xml->step,
+				'data'		=> [],
+			],
+			'update'	=> (int) $xml->lastupdate,
+		];
+
+		if($data['format']['step'] <= 0 || $data['update'] <= 0)
+		{
+			throw new Exception();
+		}
+		else if($format !== null && isset($format['step']) && $format['step'] !== $data['format']['step'])
+		{
+			throw new Exception();
+		}
+		else if(!isset($xml->rra))
+		{
+			throw new Exception();
+		}
+		else
+		{
+			$rra_count = $xml->rra->count();
+			for($rra_num = 0; $rra_num < $rra_count; $rra_num++)
+			{
+				$data['rra'][$rra_num] = [
+					'cf'		=> (string)	$xml->rra[$rra_num]->cf,
+					'xff'		=> (float)	$xml->rra[$rra_num]->params[0]->xff,
+					'pdp'		=> (float)	$xml->rra[$rra_num]->pdp_per_row,
+					'changed'	=> false,
+					'rows'		=> [],
+				];
+
+				$currentstep	= $data['format']['step'] * $data['rra'][$rra_num]['pdp'];
+				$currentupdate	= intval($data['update'] / ($currentstep)) * $currentstep;
+
+				if(!in_array($data['rra'][$rra_num]['cf'], array('AVERAGE', 'MIN', 'MAX')) || $data['rra'][$rra_num]['pdp'] <= 0)
+				{
+					throw new Exception();
+				}
+				else if(!isset($xml->rra[$rra_num]->database->row) || $xml->rra[$rra_num]->database->count() !== 1)
+				{
+					throw new Exception();
+				}
+
+				$row_count = $xml->rra[$rra_num]->database->row->count();
+
+				if($format !== null)
+				{
+					// Stimmt die Definition (Abstand/Typ) nicht überein?
+					if(!isset($format['data'][$rra_num]) || $format['data'][$rra_num][1] != $data['rra'][$rra_num]['pdp'] || $format['data'][$rra_num][2] != $data['rra'][$rra_num]['cf'])
+					{
+						throw new Exception();
+					}
+					// Müssen wir die Anzahl der Elemente auffüllen?
+					else if($change && $format['data'][$rra_num][0] > $row_count)
+					{
+						for($i = 0; $i < ($format['data'][$rra_num][0] - $row_count); $i++)
+						{
+							$time = $currentupdate - (($format['data'][$rra_num][0] - $i - 1) * $currentstep);
+							#$data['rra'][$rra_num]['rows'][$time] = false; // <-- DAS DARF NICHT "NULL" SEIN!
+							$data['rra'][$rra_num]['rows'][$time] = true; // <-- DAS DARF NICHT "NULL" SEIN!
+							$data['rra'][$rra_num]['changed'] = true;
+						}
+					}
+				}
+
+				// Erstes Vorkommen (= AVERAGE)
+				if(!isset($data['format']['data'][$rra_num]))
+				{
+					$data['format']['data'][$rra_num] = [$row_count, $data['rra'][$rra_num]['pdp']];
+				}
+
+				// Müssen Elemente entfernt werden?
+				if($format !== null && $change && $format['data'][$rra_num][0] < $row_count)
+				{
+					$row_num = $row_count - $format['data'][$rra_num][0];
+					$data['rra'][$rra_num]['changed'] = true;
+				}
+				else
+				{
+					$row_num = 0;
+				}
+
+				while($row_num < $row_count)
+				{
+					if(!isset($xml->rra[$rra_num]->database[0]->row[$row_num]->v) || $xml->rra[$rra_num]->database[0]->row[$row_num]->v->count() !== 1)
+					{
+						throw new Exception();
+					}
+					else
+					{
+						$time = $currentupdate - (($row_count - $row_num - 1) * $currentstep);
+						$value = (string) $xml->rra[$rra_num]->database[0]->row[$row_num]->v[0];
+						$data['rra'][$rra_num]['rows'][$time] = (($value === 'NaN') ? false : $value);
+					}
+
+					$row_num++;
+				}
+			}
+		}
+
+		#// Debug
+		#var_dump($data['rra'][0]['rows']);
+		#exit;
+
+		return $data;
+	}
+
+	// "unsere" Daten ins XML konvertieren
+	private function releaseData($id)
+	{
+		self::ckID($id, false, $this->xmldata);
+		self::ckID($id, false, $this->data);
+		$xml	=& $this->xmldata[$id];
+		$data	=& $this->data[$id];
+
+		#// Debug
+		#echo $xml->asXML();
+		#exit;
+
+		$rra_count = count($data['rra']);
+		for($rra_num = 0; $rra_num < $rra_count; $rra_num++)
+		{
+			if(!$data['rra'][$rra_num]['changed'])
+			{
+				continue;
+			}
+
+			/*
+			// Der nachfolgende "cdp_prep" Teil gilt nur für AVG/MIN/MAX/LAST RRA's!
+			// Etwas anderes wird bei Munin zur Zeit aber sowieso nicht verwendet.
+
+			// Um primary_value/secondary_value brauchen wir uns keine Gedanken zu machen,
+			// die können wir eigentlich auch löschen. Denn der Quellcode vom RRDTool sagt:
+			//
+			//	primary_val and secondary_val do not need to be saved between updates
+			//	so strictly speaking they could be omitted. However, they can be useful
+			//	for diagnostic purposes, so are included here.
+			unset($xml->rra[$rra_num]->cdp_prep[0]->ds[0]->primary_value);
+			unset($xml->rra[$rra_num]->cdp_prep[0]->ds[0]->secondary_value);
+
+			// Was machen wir jetzt mit "cdp_prep"?
+			// Unbedingt auf der Mailingliste fragen!
+			#unset($xml->rra[$rra_num]->cdp_prep); // <-- DEBUG !!!
+			*/
+
+			// RRA Datenbank zurücksetzen
+			unset($xml->rra[$rra_num]->database);
+			$db = $xml->rra[$rra_num]->addChild('database');
+
+			/*
+			$minimal_heartbeat = round($data['format']['step'] / $data['rra'][$rra_num]['xff']) * $data['rra'][$rra_num]['pdp'];
+			// if(!$minimal_heartbeat || !isset($xml->ds[0]->minimal_heartbeat) || $minimal_heartbeat != (int) $xml->ds[0]->minimal_heartbeat)
+			if(!$minimal_heartbeat)
+			{
+				throw new Exception();
+			}
+
+			$unknown_datapoints = 0; // null
+			$current_unknown_datapoints = 0;
+			*/
+
+			$row_count = count($data['rra'][$rra_num]['rows']);
+			$row_keys = array_keys($data['rra'][$rra_num]['rows']);
+			for($row_num = 0; $row_num < $row_count; $row_num++)
+			{
+				$row_key = $row_keys[$row_num];
+
+				if(!is_bool($data['rra'][$rra_num]['rows'][$row_key]))
+				{
+					$value = $data['rra'][$rra_num]['rows'][$row_key];
+
+					/*
+					$current_unknown_datapoints = 0;
+
+					if($unknown_datapoints === null)
+					{
+						$unknown_datapoints = 0;
+					}
+					*/
+				}
+				else
+				{
+					$value = 'NaN';
+
+					/*
+					if($unknown_datapoints !== null)
+					{
+						$current_unknown_datapoints += $data['format']['step'] * $data['rra'][$rra_num]['pdp'];
+
+						#if($current_unknown_datapoints)
+						if($current_unknown_datapoints >= $minimal_heartbeat)
+						#if($current_unknown_datapoints == $minimal_heartbeat)
+						#if(!($current_unknown_datapoints % $minimal_heartbeat))
+						{
+							$unknown_datapoints++;
+							#$current_unknown_datapoints = 0;
+						}
+					}
+					*/
+				}
+
+				$row = $db->addChild('row');
+				$row->addChild('v', $value);
+			}
+		}
+
+		/*
+		// Debug
+		#exit;
+		echo $xml->asXML();
+		exit;
+		*/
+
+		// ...
+		// ...
+
+
+	}
+
+	// Daten importieren
+	public function importData($src_id, $dst_id, $all = false)
+	{
+		self::ckID($src_id, false, $this->data);
+		self::ckID($dst_id, false, $this->data);
+
+		if($src_id == $dst_id)
+		{
+			throw new Exception();
+		}
+
+		$src =& $this->data[$src_id];
+		$dst =& $this->data[$dst_id];
+
+		if($src['format']['step'] !== $dst['format']['step'] || ($count = count($src['format']['data'])) !== count($dst['format']['data']))
+		{
+			throw new Exception();
+		}
+		else
+		{
+			for($i = 0; $i < $count; $i++)
+			{
+				if(!isset($dst['format']['data'][$i]) || $src['format']['data'][$i][1] !== $dst['format']['data'][$i][1])
+				{
+					throw new Exception();
+				}
+			}
+		}
+		unset($count, $i);
+
+		$rra_count = count($src['rra']);
+		for($rra_num = 0; $rra_num < $rra_count; $rra_num++)
+		{
+			$row_count = count($src['rra'][$rra_num]['rows']);
+			$row_keys = array_keys($src['rra'][$rra_num]['rows']);
+			for($row_num = 0; $row_num < $row_count; $row_num++)
+			{
+				$row_key = $row_keys[$row_num];
+				if(isset($dst['rra'][$rra_num]['rows'][$row_key]) && is_bool($dst['rra'][$rra_num]['rows'][$row_key]) && !is_bool($src['rra'][$rra_num]['rows'][$row_key]))
+				{
+					if($dst['rra'][$rra_num]['rows'][$row_key] === false && !$all)
+					{
+						continue;
+						#throw new Exception('filling existing data? wtf!');
+					}
+
+					$dst['rra'][$rra_num]['rows'][$row_key] = $src['rra'][$rra_num]['rows'][$row_key];
+					$dst['rra'][$rra_num]['changed'] = true;
+				}
+			}
+		}
+	}
+}
+
+function displayHelp()
+{
+?>
+Usage: <?php echo basename($_SERVER['argv'][0]); ?> [OPTIONS] --source <FILE|DIR> --destination <FILE|DIR>
+Migration tool for RRD files from Munin Monitoring software.
+
+Resize function like rrdresize based on a format definition.
+Import function for historical/deleted data from another RRD.
+Works with single files or recursively with multiple directories.
+A function to convert RRA intervals is NOT included at the moment.
+
+Mandatory arguments to long options are mandatory for short options too.
+
+
+  -s, --source=<FILE|DIR>       Input RRD file or directory with RRD files.
+                                Symbolic links are ignored for security reasons!
+                                The argument type (file or directory) must be the
+                                same for -d/--destination and -i/--import.
+
+  -d, --destination=<FILE|DIR>  Output RRD file or directory. Required subdirectories
+                                or output RRD files will be created automatically.
+
+  -o, --overwrite               Overwrite existing RRD files defined with -d/--destination.
+
+
+  -i, --import=<FILE|DIR>       Import historical/deleted data from another RRD file.
+                                Only "NaN" rows will be overridden. Even with -a/--all!
+
+  -a, --all                     Import to existing rows. COULD BE VERY DANGEROUS!
+
+
+  -f, --format=<FORMAT>         Resize the new RRD file by a new "graph_data_size".
+                                It's only possible to grow/shrink the row count!
+                                The RRA is always created with a 10% increase.
+                                There are some hard-coded shortcuts defined...
+
+  -t, --time=<SECONDS>          Set the RRD interval, also known as "update_rate".
+                                The Munin default is 300 seconds. (5 minutes)
+
+
+  -h, --help                    Display this help and exit.
+  -v, --version                 Display version and exit.
+
+
+PHP >= 5.3 and "rrdtool" (rrddump/rrdrestore) are required to run this tool.
+Tested with 1700 RRD files from a 3 years old Munin setup on a weak ARM system.
+It's not perfect and maybe there are some strange bugs. Feel free to report it!
+
+
+v<?php echo VERSION; ?> [<?php echo DATE; ?>] by <?php echo AUTHOR . "\n"; ?>
+Licence: <?php echo LICENCE . "\n"; ?>
+Source:  <?php echo SOURCE . "\n"; ?>
+<?php
+	exit(1);
+}
+
+function displayVersion()
+{
+	printf("v%s [%s]\n", VERSION, DATE);
+	exit(1);
+}
+
+?>
